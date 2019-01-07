@@ -77,7 +77,7 @@ Building
 ========
 
 The following dependencies are given:  
-- C++14
+- C++14 (no STL)
 
 The provided functions fall back to uncompressed strings if the compiler does not support C++14 or newer.  
 The library is provided header only.  
@@ -85,4 +85,4 @@ The library is provided header only.
 License
 =======
 
-Modified 3-clause BSD license. See [license file](LICENSE).  
+Modified 3-clause BSD license. See [copyright file](doc/COPYING).  

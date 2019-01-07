@@ -2,7 +2,7 @@
  * @file PackedString.hpp
  * @author Daniel Starke
  * @date 2019-01-06
- * @version 2019-01-06
+ * @version 2019-01-07
  * 
  * PackedString Copyright (c) 2019 Daniel Starke
  * All rights reserved.
@@ -871,8 +871,8 @@ constexpr static size_t pack(const char (& v)[N], unsigned char (& out)[P], cons
 	RangeEncoder enc(out, P);
 	/* encode literal */
 	encodeAndUpdatePred(enc, 0, dist.type, dist.type[2], update);
-	encodeAndUpdatePred(enc, static_cast<size_t>(*v >> 5), dist.literal, dist.literal[8], update);
-	enc.encode(static_cast<ValueType>(*v & 0x1F), static_cast<ValueType>(32));
+	encodeAndUpdatePred(enc, static_cast<size_t>(*v) >> 5, dist.literal, dist.literal[8], update);
+	enc.encode(static_cast<ValueType>(*v) & 0x1F, static_cast<ValueType>(32));
 	for (size_t i = 1, s = 0; i < N;) {
 		if ((s + ws) <= i) s = i - ws + 1;
 		/* find longest match */
@@ -918,8 +918,8 @@ constexpr static size_t pack(const char (& v)[N], unsigned char (& out)[P], cons
 		} else {
 			/* encode literal */
 			encodeAndUpdatePred(enc, 0, dist.type, dist.type[2], update);
-			encodeAndUpdatePred(enc, static_cast<size_t>(v[i] >> 5), dist.literal, dist.literal[8], update);
-			enc.encode(static_cast<ValueType>(v[i] & 0x1F), static_cast<ValueType>(32));
+			encodeAndUpdatePred(enc, static_cast<size_t>(v[i]) >> 5, dist.literal, dist.literal[8], update);
+			enc.encode(static_cast<ValueType>(v[i]) & 0x1F, static_cast<ValueType>(32));
 			i++;
 		}
 	}
