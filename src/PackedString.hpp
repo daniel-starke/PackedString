@@ -1012,7 +1012,7 @@ public:
 		case 1:
 			/* decode literal */
 			val = static_cast<char>(dec.decode(dist.literal[8], UnpackIteratorBase::map, dist.literal));
-			val = static_cast<char>((val << 5) | dec.decode(32));
+			val = static_cast<char>((static_cast<uint8_t>(val) << 5) | dec.decode(32));
 			window[UnpackIteratorBase::mod(p, ws)] = val;
 			p++;
 			state = 0;

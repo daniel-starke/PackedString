@@ -85,4 +85,4 @@ The library is provided header only.
 License
 =======
 
-Modified 3-clause BSD license. See [copyright file](doc/COPYING).  
+Modified 3-clause BSD license. See [license file](LICENSE).  
