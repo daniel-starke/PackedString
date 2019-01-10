@@ -2,7 +2,7 @@
  * @file PackedString.hpp
  * @author Daniel Starke
  * @date 2019-01-06
- * @version 2019-01-07
+ * @version 2019-01-10
  * 
  * PackedString Copyright (c) 2019 Daniel Starke
  * All rights reserved.
@@ -31,7 +31,7 @@
  * OF SUCH DAMAGE.
  * 
  * This library provides means to pack strings at compile time and unpack them at runtime. It is
- * optimized for compiled size on a ATmega328p where it incorporates a 1490 byte overhead for the
+ * optimized for compiled size on a ATmega328p where it incorporates a 1488 byte overhead for the
  * unpack routine when compiled with Arduino 1.8.5 and GCC 7.3.0. Make also sure that at least
  * window size + 100 bytes are available on the stack in case of an ATmega328p.  
  * Uncompressed strings are used as fallback if no C++14 compiler was detected.  
@@ -169,7 +169,8 @@ namespace PackedString {
 
 
 enum {
-	ShortLen = 16 /**< Optimize match lengths shorter than this by assuming that those occur more often than longer matches. */
+	SMALL_LEN = 34, /**< Prefer match lengths with less than this value. Needs to be at most MAX_LEN. */
+	MAX_LEN = 255 /**< Maximal length to match in the LZSS packing function. Needs to fit in a uint8_t variable. */
 };
 
 
@@ -618,7 +619,7 @@ public:
 	 * 
 	 * @return maximal range
 	 */
-	inline RangeType getMaxValue() const {
+	constexpr inline RangeType getMaxValue() const {
 		return MaxValue;
 	}
 	
@@ -649,9 +650,9 @@ public:
 	 */
 	__attribute__((noinline)) SymbolType decode(const ValueType range, RangeGetter retriever, void * user) {
 		/* determine value */
-		const RangeType step = RangeDecoder::div(this->high - this->low + 1, range); /* interval open at the top => +1 */
+		const RangeType step = (this->high - this->low + 1) / range; /* interval open at the top => +1 */
 		ValueType lowerBound, upperBound;
-		const SymbolType value = (*retriever)(lowerBound, upperBound, RangeDecoder::div(this->buffer - this->low, step), user);
+		const SymbolType value = (*retriever)(lowerBound, upperBound, (this->buffer - this->low) / step, user);
 	    
 		/* update upper bound */
 		this->high = this->low + (step * upperBound) - 1; /* interval open at the top => -1 */
@@ -702,17 +703,6 @@ private:
 		this->buffer = ((this->buffer - offset) << 1) | *(this->iter);
 		++(this->iter);
 	}
-	
-	/**
-	 * Helper function to reduce code usage for 32-bit division.
-	 * 
-	 * @param[in] lhs - left-hand statement
-	 * @param[in] rhs - right-hand statement
-	 * @return lhs / rhs
-	 */
-	__attribute__((noinline)) static RangeType div(const RangeType lhs, const RangeType rhs) {
-		return lhs / rhs;
-	}
 };
 
 
@@ -722,15 +712,13 @@ private:
  * @param[in] v - match within this string
  * @param[in] l - length of v
  * @param[in] s - source offset (find match from here until one prior to i)
- * @param[in] i - destination offset (match against string starting at this position)
- * @param[in] ws - window size
+ * @param[in] d - destination offset (match against string starting at this position)
+ * @param[in] max - maximal matching length
  * @return length of the match
  */
-constexpr static size_t match(const char * v, const size_t l, const size_t s, const size_t i, const uint8_t ws) {
+constexpr static size_t match(const char * v, const size_t l, const size_t s, const size_t d, const uint8_t max) {
 	size_t res = 0;
-	for (size_t e = s, j = i; j < l && res < ws && v[e] == v[j]; j++, e++, res++) {
-		if (e >= i) e = s;
-	}
+	for (size_t S = s, D = d; D < l && res < max && v[S] == v[D]; S++, D++, res++);
 	return res;
 }
 
@@ -764,6 +752,40 @@ constexpr static void encodeAndUpdatePred(RangeEncoder & enc, const size_t index
 }
 
 
+/**
+ * Encoded the symbol using a distribution function which favors smaller values of the range [0..MAX_LEN].
+ * Probabilities: 64, 64, 32, 32, 32, 16, 16, 16, 16, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 2, 2, 2, 2, 2, 2, 2, 1, ones...
+ * 
+ * @param[in] enc - encoder instance to use
+ * @param[in] index - symbol to encode
+ */
+constexpr static void encodeLikelySmallValue(RangeEncoder & enc, const size_t symbol) noexcept {
+	typedef RangeEncoder::ValueType ValueType;
+	ValueType total = 0;
+	ValueType cur = 2;
+	ValueType next = 3;
+	ValueType value = 64;
+	ValueType lowerBound = 0;
+	ValueType upperBound = value;
+	for (size_t i = 0; i <= PackedString::SMALL_LEN; i++) {
+		if (i < 28) {
+			if (cur == 0) {
+				cur = next;
+				next++;
+				value >>= 1;
+			}
+			cur--;
+		}
+		if (i == symbol) {
+			lowerBound = total;
+			upperBound = total + value;
+		}
+		total += value;
+	}
+	enc.encode(lowerBound, upperBound, static_cast<ValueType>(total));
+}
+
+
 /* forward declarations */
 struct Distribution;
 
@@ -777,7 +799,6 @@ constexpr static size_t pack(const char (& v)[N], unsigned char (& out)[P], cons
 struct Distribution {
 	uint16_t type[3]; /**< Distribution of the type flag. */
 	uint16_t literal[9]; /**< Distribution of the literal class. */
-	uint16_t len[3]; /**< Distribution of the match length value. */
 	
 	/**
 	 * Constructor.
@@ -789,17 +810,14 @@ struct Distribution {
 	template <size_t N>
 	constexpr explicit Distribution(const char (& v)[N], const uint8_t WS):
 		type{0},
-		literal{0},
-		len{0}
+		literal{0}
 	{
 		unsigned char dummy[] = {0};
 		Distribution::init(this->type);
 		Distribution::init(this->literal);
-		Distribution::init(this->len);
 		pack(v, dummy, WS, *this, true);
 		Distribution::fix(this->type);
 		Distribution::fix(this->literal);
-		Distribution::fix(this->len);
 	}
 	
 	/**
@@ -838,7 +856,6 @@ struct Distribution {
 struct TempDistribution {
 	uint16_t type[3];
 	uint16_t literal[9];
-	uint16_t len[3];
 	
 	/**
 	 * Constructor.
@@ -879,9 +896,9 @@ constexpr static size_t pack(const char (& v)[N], unsigned char (& out)[P], cons
 		size_t pos = 0;
 		size_t len = 0;
 		for (size_t j = s; j < i; j++) {
-			const size_t newLen = match(v, N, j, i, ws);
+			const size_t newLen = match(v, N, j, i, PackedString::MAX_LEN);
 			if (newLen > len) {
-				pos = i - j;
+				pos = i - j - 1;
 				len = newLen;
 			}
 		}
@@ -892,7 +909,7 @@ constexpr static size_t pack(const char (& v)[N], unsigned char (& out)[P], cons
 			for (size_t k = i + 1; k < (i + len); k++) {
 				const size_t b = (k > ws) ? k - ws + 1 : 0;
 				for (size_t j = b; j < k; j++) {
-					const size_t newLen = match(v, N, j, k, ws);
+					const size_t newLen = match(v, N, j, k, PackedString::MAX_LEN);
 					const size_t span = k - i;
 					if (newLen > span && (newLen + span) > maxLen) {
 						optLen = span;
@@ -903,18 +920,18 @@ constexpr static size_t pack(const char (& v)[N], unsigned char (& out)[P], cons
 			if (optLen > 0) len = optLen;
 		}
 		/* limit length by decode buffer size */
-		if (len > 2) {
+		if (len > 1) {
 			/* encode match as (pos, len) */
 			encodeAndUpdatePred(enc, 1, dist.type, dist.type[2], update);
 			enc.encode(static_cast<ValueType>(pos), static_cast<ValueType>(ws));
-			if (len < ShortLen) {
-				encodeAndUpdatePred(enc, 0, dist.len, dist.len[2], update);
-				enc.encode(static_cast<ValueType>(len), static_cast<ValueType>(ShortLen));
+			len -= 2;
+			if (len < PackedString::SMALL_LEN) {
+				encodeLikelySmallValue(enc, len);
 			} else {
-				encodeAndUpdatePred(enc, 1, dist.len, dist.len[2], update);
-				enc.encode(static_cast<ValueType>(len - ShortLen), static_cast<ValueType>(ws - ShortLen));
+				encodeLikelySmallValue(enc, PackedString::SMALL_LEN);
+				enc.encode(static_cast<ValueType>(len - PackedString::SMALL_LEN), static_cast<ValueType>(PackedString::MAX_LEN - PackedString::SMALL_LEN + 1));
 			}
-			i += len;
+			i += len + 2;
 		} else {
 			/* encode literal */
 			encodeAndUpdatePred(enc, 0, dist.type, dist.type[2], update);
@@ -935,12 +952,17 @@ class UnpackIteratorBase {
 private:
 	typedef RangeDecoder::SymbolType SymbolType;
 	typedef RangeDecoder::ValueType ValueType;
+	enum {
+		ST_TYPE     = 0,
+		ST_LITERAL  = 1,
+		ST_MATCH    = 2,
+		ST_MATCHING = 3
+	};
 	const size_t P; /**< packed data size */
 	size_t p; /**< unpacked data size at this point */
+	uint8_t winP; /**< window position */
 	uint8_t pos; /**< match position */
 	uint8_t len; /**< match length */
-	uint8_t j; /**< match index */
-	uint8_t limit; /**< match index limit */
 	uint8_t state; /**< unpack state machine state */
 	char val; /**< last value unpacked */
 	TempDistribution dist; /**< distribution tables */
@@ -957,12 +979,7 @@ public:
 	explicit UnpackIteratorBase(const unsigned char * cData, const size_t cSize, const size_t pSize, const TempDistribution & distribution):
 		P(pSize),
 		p(0),
-		pos(0),
-		len(0),
-		j(0),
-		limit(0),
-		state(0),
-		val(0),
+		state(ST_TYPE),
 		dist(distribution),
 		dec(cData, cSize)
 	{}
@@ -977,6 +994,31 @@ public:
 	}
 	
 	/**
+	 * Returns the sum of all values included in the small value distribution series.
+	 * 
+	 * @return total sum of small value distribution
+	 * @see UnpackIteratorBase::mapSmall()
+	 */
+	constexpr static RangeDecoder::ValueType getSmallTotal() {
+		ValueType total = 0;
+		ValueType cur = 2;
+		ValueType next = 3;
+		ValueType value = 64;
+		for (size_t i = 0; i <= PackedString::SMALL_LEN; i++) {
+			if (i < 28) {
+				if (cur == 0) {
+					cur = next;
+					next++;
+					value >>= 1;
+				}
+				cur--;
+			}
+			total += value;
+		}
+		return total;
+	}
+	
+	/**
 	 * Maps the decoded range value to a symbol. Adjusts the lower and upper bounds values for the
 	 * decoder.
 	 * 
@@ -986,7 +1028,7 @@ public:
 	 * @param[in] user - user defined data (the distribution table to use)
 	 * @return mapped symbol
 	 */
-	static SymbolType map(ValueType & lowerBound, ValueType & upperBound, const ValueType matchValue, void * user) __attribute__((noinline)) {
+	static SymbolType mapDist(ValueType & lowerBound, ValueType & upperBound, const ValueType matchValue, void * user) __attribute__((noinline)) {
 		const uint16_t * pred = reinterpret_cast<const uint16_t *>(user);
 		SymbolType i = 0;
 		for (lowerBound = 0; (lowerBound + pred[i]) <= matchValue; i++) {
@@ -997,48 +1039,85 @@ public:
 	}
 	
 	/**
+	 * Maps the decoded range value to a symbol. Adjusts the lower and upper bounds values for the
+	 * decoder. The symbol probabilities are defined as:
+	 * 64, 64, 32, 32, 32, 16, 16, 16, 16, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 2, 2, 2, 2, 2, 2, 2, 1, ones...
+	 * 
+	 * @param[out] lowerBound - lower bound value for the next symbol (provided to the decoder)
+	 * @param[out] upperBound - upper bound value for the next symbol (provided to the decoder)
+	 * @param[in] matchValue - range value to map
+	 * @param[in] user - user defined data (unused)
+	 * @return mapped symbol
+	 * @see UnpackIteratorBase::getSmallTotal()
+	 */
+	static SymbolType mapSmall(ValueType & lowerBound, ValueType & upperBound, const ValueType matchValue, void *) __attribute__((noinline)) {
+		SymbolType i = 0;
+		SymbolType cur = 2;
+		SymbolType next = 3;
+		SymbolType value = 64;
+		for (lowerBound = 0; ; i++) {
+			if (i < 28) {
+				if (cur == 0) {
+					cur = next;
+					next++;
+					value >>= 1;
+				}
+				cur--;
+			}
+			if ((lowerBound + value) > matchValue) break;
+			lowerBound += static_cast<ValueType>(value);
+		}
+		upperBound = static_cast<ValueType>(lowerBound + value);
+		return i;
+	}
+	
+	/**
 	 * Decodes the next character.
 	 * 
 	 * @param[in] window - window buffer to use
 	 * @param[in] ws - window size
 	 */
 	void next(char * window, const uint8_t ws) __attribute__((noinline)) {
+		if (winP >= ws) winP = 0;
 		switch (state) {
-		case 0:
+		case ST_TYPE:
 			/* decode type */
-			state = static_cast<int>(dec.decode(dist.type[2], UnpackIteratorBase::map, dist.type)) + 1;
+			state = static_cast<int>(dec.decode(dist.type[2], UnpackIteratorBase::mapDist, dist.type)) + 1;
 			this->next(window, ws);
 			break;
-		case 1:
+		case ST_LITERAL:
 			/* decode literal */
-			val = static_cast<char>(dec.decode(dist.literal[8], UnpackIteratorBase::map, dist.literal));
+			val = static_cast<char>(dec.decode(dist.literal[8], UnpackIteratorBase::mapDist, dist.literal));
 			val = static_cast<char>((static_cast<uint8_t>(val) << 5) | dec.decode(32));
-			window[UnpackIteratorBase::mod(p, ws)] = val;
+			window[winP++] = val;
 			p++;
-			state = 0;
+			state = ST_TYPE;
 			break;
-		case 2:
+		case ST_MATCH:
 			/* decode match as (pos, len) */
-			pos = dec.decode(ws);
-			if (dec.decode(dist.len[2], UnpackIteratorBase::map, dist.len) == 0) {
-				len = dec.decode(ShortLen);
-			} else {
-				len = dec.decode(ws - ShortLen) + ShortLen;
+			pos = dec.decode(ws) + 1;
+			len = dec.decode(UnpackIteratorBase::getSmallTotal(), UnpackIteratorBase::mapSmall, NULL) + 2;
+			if (len >= (PackedString::SMALL_LEN + 2)) {
+				len += dec.decode(PackedString::MAX_LEN - PackedString::SMALL_LEN + 1);
 			}
-			limit = (p < ws) ? p : ws;
-			state = 3;
+			if (pos > winP) {
+				pos = ws + winP - pos;
+			} else {
+				pos = winP - pos;
+			}
+			state = ST_MATCHING;
 			/* fall through */
-		default:
+		default: /* ST_MATCHING */
 			/* process match */
-			if (j < len) {
-				val = window[UnpackIteratorBase::mod((p - pos + UnpackIteratorBase::mod(j, pos)), limit)];
-				window[UnpackIteratorBase::mod((p + j), ws)] = val;
-				j++;
+			if (len > 0) {
+				val = window[pos++];
+				if (pos >= ws) pos = 0;
+				window[winP++] = val;
+				p++;
+				len--;
 			} else {
 				/* end of match; proceed with next character */
-				j = 0;
-				p += len;
-				state = 0;
+				state = ST_TYPE;
 				this->next(window, ws);
 			}
 			break;
@@ -1060,19 +1139,7 @@ public:
 	 * @return number of decoded characters
 	 */
 	inline size_t getUnpackedPos() const {
-		return this->p + this->j;
-	}
-	
-private:
-	/**
-	 * Calculates the modulo. Helper function to decrease the compiled code size.
-	 * 
-	 * @param[in] lhs - left-hand statement
-	 * @param[in] rhs - right-hand statement
-	 * @return lhs % rhs
-	 */
-	inline static uint8_t mod(const size_t lhs, const uint8_t rhs) {
-		return lhs % rhs;
+		return this->p;
 	}
 };
 
