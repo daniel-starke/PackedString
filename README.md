@@ -51,7 +51,7 @@ using the C++17 `if constexpr` feature:
 	"Hello World!"
 
 int main() {
-	if constexpr ((PACKED_STR_SIZE(WINDOW_SIZE, PLAINTEXT_STR) + 1490) < sizeof(PLAINTEXT_STR)) {
+	if constexpr ((PACKED_STR_SIZE(WINDOW_SIZE, PLAINTEXT_STR) + 1488) < sizeof(PLAINTEXT_STR)) {
 		UNPACK_STR(const char b, WINDOW_SIZE, PLAINTEXT_STR) {
 			fputc(b, stdout);
 		}
